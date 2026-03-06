@@ -1,0 +1,149 @@
+[
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "schedule_id": "1468",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "[]"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "schedule_id": "1468",
+      "facility_id": "19347",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "[]"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "schedule_ids[]": "1468",
+      "api_key": "no_limits"
+    },
+    "status": 400,
+    "body": "{\"success\":false,\"msg\":\"Group ID or Schedule ID required to get tee times\"}"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "course_id": "1468",
+      "api_key": "no_limits"
+    },
+    "status": 400,
+    "body": "{\"success\":false,\"msg\":\"Group ID or Schedule ID required to get tee times\"}"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "course_id": "19347",
+      "schedule_id": "1468",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "[]"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "holes": "18",
+      "players": "2",
+      "schedule_id": "1468",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "[]"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "schedule_id": "1468",
+      "booking_class": "0",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "[]"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "schedule_id": "1468",
+      "booking_class_id": "0",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "[]"
+  },
+  {
+    "params": {
+      "date": "2026-03-07",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "schedule_id": "1468",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "[]"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "schedule_id": "1469",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "[]"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "schedule_id": "19348",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "false"
+  },
+  {
+    "params": {
+      "date": "03/07/2026",
+      "time": "all",
+      "holes": "18",
+      "players": "2",
+      "schedule_id": "19346",
+      "api_key": "no_limits"
+    },
+    "status": 200,
+    "body": "false"
+  }
+]
