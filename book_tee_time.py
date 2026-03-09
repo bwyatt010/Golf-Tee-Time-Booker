@@ -81,9 +81,13 @@ def wait_for_drop(dry_run=False):
     now    = datetime.now(PT)
     target = now.replace(hour=19, minute=0, second=0, microsecond=0)
     if now >= target:
-        log.info("Already past 7:00 PM PT drop. Proceeding immediately.")
+        log.info(f"Already past 7:00 PM PT drop ({now.strftime('%I:%M:%S %p PT')}). Proceeding immediately.")
         return
     diff = (target - now).total_seconds()
+    # Hard cap: never wait more than 15 minutes — if we're more than 15 min early something is wrong
+    if diff > 900:
+        log.warning(f"Drop is {diff/60:.0f} min away — too far out, proceeding immediately to avoid hanging.")
+        return
     log.info(f"Current time:   {now.strftime('%I:%M:%S %p PT')}")
     log.info(f"Tee times drop: 7:00:00 PM PT")
     log.info(f"Waiting {diff:.0f}s ({diff/60:.1f} min)...")
@@ -224,36 +228,60 @@ def run_bot(headless=False, dry_run=False, no_wait=False, override_date=None,
         try:
             # ── Step 1: Login ─────────────────────────────────────────────
             log.info("Step 1: Logging in...")
-            page.goto(
-                f"https://foreupsoftware.com/index.php/booking/{facility_id}#/login",
-                wait_until="networkidle",
-            )
-            time.sleep(1)
-            ss("debug_login_page.png")
 
-            for sel in ["input[name='username']", "input[placeholder='Username']",
-                        "input[name='email']", "input[type='email']", "input[type='text']"]:
-                el = page.query_selector(sel)
-                if el and el.is_visible():
-                    page.fill(sel, username)
-                    break
+            def do_login():
+                page.goto(
+                    f"https://foreupsoftware.com/index.php/booking/{facility_id}#/login",
+                    wait_until="networkidle",
+                )
+                time.sleep(2)
+                ss("debug_login_page.png")
+                filled_user = False
+                for sel in ["input[name='username']", "input[placeholder='Username']",
+                            "input[name='email']", "input[type='email']", "input[type='text']"]:
+                    el = page.query_selector(sel)
+                    if el and el.is_visible():
+                        page.fill(sel, username)
+                        filled_user = True
+                        log.info(f"  Filled username via: {sel}")
+                        break
+                filled_pass = False
+                for sel in ["input[name='password']", "input[type='password']"]:
+                    el = page.query_selector(sel)
+                    if el and el.is_visible():
+                        page.fill(sel, password)
+                        filled_pass = True
+                        break
+                if not filled_user or not filled_pass:
+                    log.warning(f"  Login fields not found. Page: {page.inner_text('body')[:200]}")
+                    return False
+                for sel in ['button:has-text("SIGN IN")', 'button:has-text("Sign In")',
+                            'button[type="submit"]', 'input[type="submit"]']:
+                    btn = page.query_selector(sel)
+                    if btn and btn.is_visible():
+                        btn.click()
+                        log.info(f"  Clicked: {sel}")
+                        break
+                page.wait_for_load_state("networkidle")
+                time.sleep(2)
+                ss("debug_login_result.png")
+                body = page.inner_text("body").lower()
+                if "log out" in body or "logout" in body or "my account" in body:
+                    return True
+                if "log in" in body or "sign in" in body or "forgot password" in body:
+                    log.warning(f"  Still on login page after submit.")
+                    return False
+                return True
 
-            for sel in ["input[name='password']", "input[type='password']"]:
-                el = page.query_selector(sel)
-                if el and el.is_visible():
-                    page.fill(sel, password)
-                    break
+            if not do_login():
+                log.warning("  Login attempt 1 failed — retrying in 3s...")
+                time.sleep(3)
+                if not do_login():
+                    log.error("  Login failed after 2 attempts. Check FOREUP_EMAIL / FOREUP_PASSWORD in .env")
+                    ss("debug_login_failed.png")
+                    browser.close()
+                    return (False, None)
 
-            for sel in ['button:has-text("SIGN IN")', 'button:has-text("Sign In")',
-                        'button[type="submit"]', 'input[type="submit"]']:
-                btn = page.query_selector(sel)
-                if btn and btn.is_visible():
-                    btn.click()
-                    break
-
-            page.wait_for_load_state("networkidle")
-            time.sleep(1)
-            ss("debug_login_result.png")
             log.info("  Logged in.")
 
             # ── Step 2: Navigate to booking page ──────────────────────────
@@ -263,46 +291,45 @@ def run_bot(headless=False, dry_run=False, no_wait=False, override_date=None,
             ss("debug_after_nav.png")
 
             # ── Step 3: Click booking class button ────────────────────────
-            # "Resident (0-7 days)" for Torrey Pines
-            # "Standard Tee Times (0-7 days)" for Mission Bay
-            body_text = page.inner_text("body").lower()
-            if any(kw in body_text for kw in ["please read", "resident", "standard", "tee time"]):
-                log.info("Step 3: Clicking booking class button...")
-                page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
-                time.sleep(1)
+            # Always attempt — covers Torrey "Resident (0-7 days)", Mission Bay "Standard Tee Times", etc.
+            log.info("Step 3: Clicking booking class button...")
+            page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+            time.sleep(1)
+            ss("debug_step3_page.png")
 
-                clicked_class = False
-                for phrase in ["Resident (0 - 7", "Resident (0-7", "Resident",
-                               "Standard Tee Times (0-7", "Standard Tee Times",
-                               "Standard", "Public", "General Public"]:
-                    # Use JS text search to avoid CSS selector issues with parens
-                    el_handle = page.evaluate_handle("""(phrase) => {
-                        const els = Array.from(document.querySelectorAll('a, button'));
-                        return els.find(e =>
-                            e.textContent.includes(phrase) && e.offsetParent !== null
-                        ) || null;
-                    }""", phrase)
-                    try:
-                        el = el_handle.as_element()
-                    except Exception:
-                        el = None
-                    if el and el.is_visible():
-                        log.info(f"  Clicking: {el.inner_text()[:60]}")
-                        el.click()
-                        page.wait_for_load_state("networkidle")
-                        time.sleep(2)
-                        ss("debug_after_booking_class.png")
-                        clicked_class = True
-                        break
+            clicked_class = False
+            for phrase in ["Resident (0 - 7", "Resident (0-7", "Resident",
+                           "Standard Tee Times (0-7", "Standard Tee Times",
+                           "Standard", "Public", "General Public"]:
+                el_handle = page.evaluate_handle(
+                    "(phrase) => { var els = Array.from(document.querySelectorAll('a, button')); "
+                    "return els.find(function(e) { "
+                    "return e.textContent.indexOf(phrase) !== -1 && e.offsetParent !== null; "
+                    "}) || null; }",
+                    phrase
+                )
+                try:
+                    el = el_handle.as_element()
+                except Exception:
+                    el = None
+                if el and el.is_visible():
+                    log.info(f"  Clicking booking class: {el.inner_text()[:60]}")
+                    el.click()
+                    page.wait_for_load_state("networkidle")
+                    time.sleep(2)
+                    ss("debug_after_booking_class.png")
+                    clicked_class = True
+                    break
 
-                if not clicked_class:
-                    all_btns = page.evaluate(
-                        "() => Array.from(document.querySelectorAll('a, button'))"
-                        ".filter(e => e.offsetParent !== null)"
-                        ".map(e => e.textContent.trim()).filter(t => t.length > 2 && t.length < 60)"
-                        ".join(' | ')"
-                    )
-                    log.warning(f"  No booking class button found. Visible: {all_btns[:400]}")
+            if not clicked_class:
+                all_btns = page.evaluate(
+                    "() => Array.from(document.querySelectorAll('a, button'))"
+                    ".filter(function(e) { return e.offsetParent !== null; })"
+                    ".map(function(e) { return e.textContent.trim(); })"
+                    ".filter(function(t) { return t.length > 2 && t.length < 80; })"
+                    ".join(' | ')"
+                )
+                log.warning(f"  No booking class button found. Visible buttons: {all_btns[:600]}")
 
             # ── Step 4: Jump to target date via calendar ──────────────────
             log.info(f"Step 4: Jumping to {date_disp} via calendar...")
@@ -408,126 +435,294 @@ def run_bot(headless=False, dry_run=False, no_wait=False, override_date=None,
                 browser.close()
                 return (True, None)
 
-            # ── Step 6: Open booking modal ────────────────────────────────
-            target_card.click()
-            time.sleep(2)
-            ss("debug_booking_modal.png")
-            log.info("Step 6: Modal open.")
+            # ── Steps 6-10: Solve captcha in-browser, then blitz booking ──
+            # Strategy: open a second tab pointing at ForeUp's own page,
+            # solve captcha there via 2captcha (same browser = valid token),
+            # then blitz card→modal→players→Book Time + inject token.
 
-            # ── Step 7: Select players (decoy + target) ───────────────────
-            log.info(f"Step 7: Selecting {num_players} player(s)...")
-            time.sleep(1)
+            captured = {"reservation_id": None, "headers": {}, "orig_body": None}
+
+            def handle_request(route, request):
+                url = request.url
+                if "rum" in url:
+                    route.continue_()
+                    return
+                if "foreupsoftware.com" in url and request.method == "POST":
+                    body = request.post_data or ""
+                    # Capture original pending_reservation request body + headers
+                    if "pending_reservation" in url and "TTID_" not in url and not captured["orig_body"] and body:
+                        captured["orig_body"] = body
+                        captured["headers"] = dict(request.headers)
+                        log.info(f"  Captured create body: {body[:120]}")
+                    # Also capture TTID from URL if present (refresh keepalives)
+                    if "TTID_" in url and not captured["reservation_id"]:
+                        ttid = "TTID_" + url.split("TTID_")[1].split("?")[0].split("/")[0]
+                        captured["reservation_id"] = ttid
+                        log.info(f"  Captured TTID from URL: {ttid}")
+                route.continue_()
+
+            def handle_response(response):
+                url = response.url
+                if "foreupsoftware.com" in url and "pending_reservation" in url and "TTID_" not in url:
+                    try:
+                        txt = response.text()
+                        if "TTID_" in txt:
+                            ttid = "TTID_" + txt.split("TTID_")[1].split('"')[0].split("'")[0]
+                            if not captured["reservation_id"]:
+                                captured["reservation_id"] = ttid
+                                log.info(f"  Captured TTID from response: {ttid}")
+                    except Exception:
+                        pass
+
+            page.on("response", handle_response)
+
+            page.route("**/*", handle_request)
+
+            sitekey = "6Le0bf4pAAAAALufPGSllYP0-QN79MW_XTUa-24h"
+            captcha_token = None
+            if not captcha_key:
+                log.error("  No TWOCAPTCHA_KEY set.")
+                page.unroute("**/*")
+                browser.close()
+                return (False, None)
+
+            # ── Step 6: Solve captcha IN our browser (same IP = valid token) ──
+            # Open a second tab with a minimal page hosting ForeUp's reCAPTCHA sitekey.
+            # Submit that tab's URL to 2captcha — the token is tied to our browser's IP.
+            log.info("Step 6: Solving captcha in-browser (second tab)...")
+            cap_page = context.new_page()
+            captcha_html = (
+                "<!DOCTYPE html><html><body>"
+                f'<div class="g-recaptcha" data-sitekey="{sitekey}"></div>'
+                '<script src="https://www.google.com/recaptcha/api.js"></script>'
+                "</body></html>"
+            )
+            cap_page.set_content(captcha_html)
+            cap_url = "https://foreupsoftware.com/"  # use ForeUp domain for token validity
+            cap_page.wait_for_timeout(2000)
+
+            try:
+                r = requests.post("https://2captcha.com/in.php", data={
+                    "key": captcha_key, "method": "userrecaptcha",
+                    "googlekey": sitekey, "pageurl": cap_url, "json": 1,
+                }, timeout=15)
+                res = r.json()
+                if res.get("status") != 1:
+                    log.error(f"  2captcha submit failed: {res}")
+                else:
+                    captcha_id = res["request"]
+                    log.info(f"  Job {captcha_id} — polling...")
+                    for attempt in range(30):
+                        page.wait_for_timeout(5000)
+                        try:
+                            pr = requests.get("https://2captcha.com/res.php", params={
+                                "key": captcha_key, "action": "get",
+                                "id": captcha_id, "json": 1,
+                            }, timeout=15).json()
+                            if pr.get("status") == 1:
+                                captcha_token = pr["request"]
+                                log.info(f"  Solved after {attempt+1} polls!")
+                                # Inject token into the captcha page so it's "used" in our browser
+                                cap_page.evaluate(
+                                    "(t) => { var r = document.getElementById('g-recaptcha-response');"
+                                    " if (!r) { var els = document.getElementsByName('g-recaptcha-response');"
+                                    "   r = els.length ? els[0] : null; }"
+                                    " if (r) { r.value = t; r.innerHTML = t; } }",
+                                    captcha_token
+                                )
+                                break
+                            elif pr.get("request") not in ("CAPCHA_NOT_READY", "CAPTCHA_NOT_READY"):
+                                log.error(f"  2captcha error: {pr}")
+                                break
+                            else:
+                                log.info(f"  Poll {attempt+1}: not ready")
+                        except Exception as pe:
+                            log.error(f"  Poll error: {pe}")
+                            break
+            except Exception as ce:
+                log.error(f"  2captcha error: {ce}")
+
+            cap_page.close()
+
+            if not captcha_token:
+                log.error("  No captcha token.")
+                page.unroute("**/*")
+                browser.close()
+                return (False, None)
+
+            log.info(f"  Token ready — blitzing booking...")
+
+            # ── Step 7: Click card, open modal ────────────────────────────
+            target_card.click()
+            page.wait_for_timeout(2500)
+            log.info("Step 7: Modal open.")
+
+            # ── Step 8: Select players ────────────────────────────────────
+            log.info(f"Step 8: Selecting {num_players} player(s)...")
             decoy = 2 if num_players != 2 else 3
 
             def click_player_btn(n):
                 try:
                     modal = page.locator(".modal-dialog, .modal-content, .modal")
-                    btn   = modal.locator("a").filter(has_text=str(n)).first
+                    btn = modal.locator("a").filter(has_text=str(n)).first
                     if btn.count() > 0 and btn.is_visible():
                         btn.click()
                         return f"modal-a:{n}"
                 except Exception:
                     pass
                 try:
-                    result = page.evaluate(f"""() => {{
-                        const btn = Array.from(document.querySelectorAll('a'))
-                            .find(b => b.textContent.trim() === '{n}' && b.offsetParent !== null);
-                        if (btn) {{ btn.click(); return btn.className; }}
-                        return null;
-                    }}""")
+                    result = page.evaluate(
+                        "(n) => { var btn = Array.from(document.querySelectorAll('a'))"
+                        ".find(function(b) { return b.textContent.trim() === String(n) && b.offsetParent !== null; });"
+                        " if (btn) { btn.click(); return btn.className; } return null; }",
+                        n
+                    )
                     return f"js:{result}"
                 except Exception as e:
                     return f"failed:{e}"
 
             log.info(f"  Decoy ({decoy}): {click_player_btn(decoy)}")
-            time.sleep(0.4)
+            page.wait_for_timeout(400)
             log.info(f"  Target ({num_players}): {click_player_btn(num_players)}")
-            time.sleep(0.5)
+            page.wait_for_timeout(600)
 
-            if not page.query_selector(':text("Please select the number")'):
-                log.info("  Player count confirmed.")
-            else:
-                log.warning("  Player error still showing — proceeding anyway")
+            # ── Step 9: Inject token into browser and submit via grecaptcha callback ──
+            log.info("Step 9: Injecting captcha token and triggering browser submission...")
 
-            # ── Step 8: Click Book Time ────────────────────────────────────
-            log.info("Step 8: Clicking Book Time...")
-            for sel in ['button:has-text("Book Time")', 'button:has-text("Book")']:
-                btn = page.query_selector(sel)
-                if btn and btn.is_visible():
-                    btn.click()
-                    log.info("  Clicked.")
+            # Wait for TTID from card-click response
+            for _ in range(15):
+                page.wait_for_timeout(300)
+                if captured["reservation_id"]:
                     break
-            time.sleep(3)
-            ss("debug_after_book_click.png")
 
-            # ── Step 9: Solve reCAPTCHA via 2captcha ──────────────────────
-            if captcha_key:
-                sitekey = page.evaluate("""() => {
-                    const el = document.querySelector('[data-sitekey]');
-                    return el ? el.getAttribute('data-sitekey') : null;
-                }""")
-                log.info(f"  reCAPTCHA sitekey: {sitekey}")
+            log.info(f"  TTID: {captured['reservation_id']}")
+            log.info(f"  orig_body captured: {bool(captured['orig_body'])}")
 
-                if sitekey:
-                    log.info("Step 9: Solving reCAPTCHA via 2captcha...")
-                    try:
-                        r   = requests.post("https://2captcha.com/in.php", data={
-                            "key": captcha_key, "method": "userrecaptcha",
-                            "googlekey": sitekey, "pageurl": page.url, "json": 1,
-                        })
-                        res = r.json()
-                        if res.get("status") == 1:
-                            captcha_id = res["request"]
-                            log.info(f"  Job {captcha_id} submitted — polling...")
-                            token = None
-                            for _ in range(24):  # up to 2 minutes
-                                time.sleep(5)
-                                pr = requests.get("https://2captcha.com/res.php", params={
-                                    "key": captcha_key, "action": "get",
-                                    "id": captcha_id, "json": 1,
-                                }).json()
-                                if pr.get("status") == 1:
-                                    token = pr["request"]
-                                    log.info(f"  Solved! {token[:40]}...")
-                                    break
-                                elif pr.get("request") != "CAPCHA_NOT_READY":
-                                    log.error(f"  2captcha error: {pr}")
-                                    break
+            # Click Book Time — this initializes the reCAPTCHA widget
+            log.info("  Clicking Book Time to initialize captcha widget...")
+            page.evaluate(
+                "() => { var btns = Array.from(document.querySelectorAll('button'));"
+                " var btn = btns.find(function(b) { return b.textContent.indexOf('Book') !== -1; });"
+                " if (btn) btn.click(); }"
+            )
+            # Wait for captcha widget to initialize (grecaptcha_cfg gets populated)
+            page.wait_for_timeout(2000)
 
-                            if token:
-                                page.evaluate("""(t) => {
-                                    const r = document.getElementById('g-recaptcha-response');
-                                    if (r) r.value = t;
-                                    document.querySelectorAll('[name="g-recaptcha-response"]')
-                                        .forEach(e => e.value = t);
-                                    try {
-                                        const id = Object.keys(
-                                            window.___grecaptcha_cfg?.clients || {})[0];
-                                        if (id !== undefined) {
-                                            const c = window.___grecaptcha_cfg.clients[id];
-                                            for (const k of Object.keys(c)) {
-                                                if (c[k]?.callback) { c[k].callback(t); break; }
-                                            }
-                                        }
-                                    } catch(e) {}
-                                }""", token)
-                                log.info("  Token injected.")
-                                time.sleep(1)
-                                for sel in ['button:has-text("Book Time")', 'button:has-text("Book")']:
-                                    btn = page.query_selector(sel)
-                                    if btn and btn.is_visible():
-                                        btn.click()
-                                        log.info("  Re-clicked Book Time after captcha.")
-                                        break
-                        else:
-                            log.error(f"  2captcha submit failed: {res}")
-                    except Exception as ce:
-                        log.error(f"  2captcha error: {ce}")
-                else:
-                    log.info("  No reCAPTCHA present — proceeding.")
+            # Now inject token AND fire the grecaptcha callback that ForeUp registered
+            inject_result = page.evaluate(
+                "(t) => {"
+                " var r = document.getElementById('g-recaptcha-response');"
+                " if (!r) { var els = document.getElementsByName('g-recaptcha-response');"
+                "   r = els.length ? els[0] : null; }"
+                " if (r) { r.value = t; r.innerHTML = t; }"
+                " var called = 'token_set';"
+                " try {"
+                "   var cfg = window.___grecaptcha_cfg;"
+                "   if (cfg && cfg.clients) {"
+                "     var keys = Object.keys(cfg.clients);"
+                "     for (var i=0; i<keys.length; i++) {"
+                "       var c = cfg.clients[keys[i]];"
+                "       var ckeys = Object.keys(c);"
+                "       for (var j=0; j<ckeys.length; j++) {"
+                "         var v = c[ckeys[j]];"
+                "         if (v && typeof v.callback === 'function') {"
+                "           v.callback(t); called = 'fired:callback'; break; }"
+                "         if (v && typeof v === 'object') {"
+                "           var vkeys = Object.keys(v);"
+                "           for (var k=0; k<vkeys.length; k++) {"
+                "             var vv = v[vkeys[k]];"
+                "             if (vv && typeof vv.callback === 'function') {"
+                "               vv.callback(t); called = 'fired:nested:' + vkeys[k]; break; }"
+                "           }"
+                "         }"
+                "       }"
+                "     }"
+                "   }"
+                " } catch(e) { called += ':err:' + e; }"
+                " return called; }",
+                captcha_token
+            )
+            log.info(f"  Inject result: {inject_result}")
+            page.wait_for_timeout(3000)
+
+            page.unroute("**/*")
+            page.remove_listener("response", handle_response)
+
+            # Check if browser booking succeeded
+            page_final = page.inner_text("body").lower()
+            log.info(f"  Page after inject: {page_final[:150]}")
+            if any(w in page_final for w in ["confirmed", "receipt", "thank you", "booking id", "tee time booked"]):
+                log.info("=" * 60)
+                log.info("TEE TIME BOOKED SUCCESSFULLY (browser)!")
+                log.info(f"   Course:  {course_names[0]}")
+                log.info(f"   Date:    {date_disp}")
+                log.info(f"   Time:    {selected_text}")
+                log.info(f"   Players: {num_players}  |  Holes: {num_holes}")
+                log.info("=" * 60)
+                browser.close()
+                return (True, None)
+            log.info(f"  Final TTID: {captured['reservation_id']}")
+
+            # ── Step 10: POST confirm with pre-solved captcha token ────────
+            log.info("Step 10: Confirming via API...")
+            if not captured["reservation_id"]:
+                log.error("  No TTID captured — card-click response did not contain TTID.")
+                browser.close()
+                return (False, None)
+            cookies = {c["name"]: c["value"] for c in context.cookies()}
+            ttid = captured["reservation_id"]
+            base = "https://foreupsoftware.com/index.php/api/booking"
+
+            from urllib.parse import parse_qs, urlencode
+            if captured["orig_body"]:
+                params = {k: v[0] for k, v in parse_qs(captured["orig_body"]).items()}
             else:
-                log.warning("  No TWOCAPTCHA_KEY — cannot auto-solve reCAPTCHA.")
-                log.warning("  Add TWOCAPTCHA_KEY to .env (sign up at 2captcha.com, ~$3/1000 solves)")
+                params = {"booking_class_id": schedule_id, "schedule_id": schedule_id}
+
+            params["players"] = str(num_players)
+            params["holes"] = str(num_holes)
+            params["g-recaptcha-response"] = captcha_token
+            form_body = urlencode(params)
+            log.info(f"  Body: {form_body[:200]}")
+
+            hdrs = {k: v for k, v in captured["headers"].items()
+                    if k.lower() not in ("content-length", "host")}
+            hdrs["Content-Type"] = "application/x-www-form-urlencoded"
+
+            confirm_url = f"{base}/pending_reservation/{ttid}"
+            booked = False
+            for method in ["POST", "PUT"]:
+                try:
+                    resp = requests.request(method, confirm_url, data=form_body,
+                                            cookies=cookies, headers=hdrs, timeout=15)
+                    log.info(f"  {method}: {resp.status_code} {resp.text[:300]}")
+                    txt = resp.text.lower().replace(" ", "")
+                    if resp.status_code in (200, 201) and ('"success":true' in txt or "tee_time" in txt):
+                        log.info("=" * 60)
+                        log.info("TEE TIME BOOKED SUCCESSFULLY!")
+                        log.info(f"   Course:  {course_names[0]}")
+                        log.info(f"   Date:    {date_disp}")
+                        log.info(f"   Time:    {selected_text}")
+                        log.info(f"   Players: {num_players}  |  Holes: {num_holes}")
+                        log.info("=" * 60)
+                        try:
+                            msg = "Booked {} at {} on {}".format(selected_text, course_names[0], date_disp)
+                            import subprocess
+                            subprocess.run(["osascript", "-e",
+                                'display notification "' + msg + '" with title "Tee Time Booked!"'],
+                                check=False)
+                        except Exception:
+                            pass
+                        booked = True
+                        browser.close()
+                        return (True, None)
+                    if booked:
+                        break
+                except Exception as e:
+                    log.error(f"  {method} error: {e}")
+
+            if not booked:
+                log.error("  Booking API failed — see responses above")
 
             # ── Step 10: Check result ──────────────────────────────────────
             time.sleep(5)
@@ -536,7 +731,13 @@ def run_bot(headless=False, dry_run=False, no_wait=False, override_date=None,
             log.info(f"  Page text: {page_text[:400]}")
 
             if "please select the number of players" in page_text or "trouble booking" in page_text:
-                log.error("  Booking failed — check booking_result.png")
+                log.error("  Booking failed — player selection error. Check booking_result.png")
+                browser.close()
+                return (False, None)
+
+            # If we're back on the tee times search page, the booking didn't go through
+            if "time of day" in page_text and "holes" in page_text and "players" in page_text:
+                log.error("  Booking failed — returned to tee sheet (likely captcha blocked). Check booking_result.png")
                 browser.close()
                 return (False, None)
 
@@ -600,7 +801,7 @@ def run_bot_with_logging(config, log_dir):
         success, fallback_desc = run_bot(
             headless=True,
             dry_run=config.get("dry_run", False),
-            no_wait=config.get("no_wait", False),  # False = use internal 7PM countdown
+            no_wait=config.get("no_wait", True),  # True = cron already fired at 7PM, skip internal wait
             config=config,
             log_dir=log_dir,
         )
